@@ -45,14 +45,16 @@ async def lifespan(app: FastAPI):
     vector_store = FAISSVectorStore()
     embedding_model = EmbeddingModel()
     llm = OllamaLLM()
-    
+
     # Check Ollama connection
     if not llm.check_connection():
         print("WARNING: Ollama is not running. Please start Ollama to use the chat feature.")
-    
-    rag_pipeline = RAGPipeline(vector_store, embedding_model, llm)
-    guardrails_manager = GuardrailsManager()
-    security_logger = SecurityLogger()
+
+    # Build the guardrails manager once so the semantic-guard seed embeddings and
+    # the (optional) Presidio engine are initialised a single time at startup.
+    guardrails_manager = GuardrailsManager(embedding_model=embedding_model, llm=llm)
+    security_logger = guardrails_manager.logger
+    rag_pipeline = RAGPipeline(vector_store, embedding_model, llm, guardrails_manager)
     
     print("RAG Guardrails system initialized successfully!")
     
@@ -96,6 +98,8 @@ class ChatResponse(BaseModel):
     blocked: bool = False
     block_reason: Optional[str] = None
     guardrail_logs: List[dict] = []
+    trace: List[dict] = []
+    threat_level: float = 0.0
 
 
 class UploadResponse(BaseModel):
@@ -110,6 +114,7 @@ class StatusResponse(BaseModel):
     model_available: bool
     documents_count: int
     sources: List[str]
+    capabilities: dict = {}
 
 
 # API Endpoints
@@ -128,11 +133,22 @@ async def get_status() -> StatusResponse:
     """Get system status."""
     llm = OllamaLLM()
     
+    gm = guardrails_manager
+    capabilities = {
+        "regex_guard": True,
+        "semantic_guard": bool(gm and getattr(gm.semantic_guard, "enabled", False)),
+        "llm_judge": bool(gm and getattr(gm.threat_engine, "llm_judge_enabled", False)),
+        "canary": bool(gm and getattr(gm.canary, "enabled", False)),
+        "presidio_pii": bool(gm and getattr(gm.output_guard, "_presidio", None) is not None),
+        "model": llm.model,
+    }
+
     return StatusResponse(
         ollama_connected=llm.check_connection(),
         model_available=llm.check_model_available(),
         documents_count=vector_store.count if vector_store else 0,
-        sources=vector_store.get_all_sources() if vector_store else []
+        sources=vector_store.get_all_sources() if vector_store else [],
+        capabilities=capabilities,
     )
 
 
@@ -232,7 +248,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
             guardrails_active=response.guardrails_active,
             blocked=response.blocked,
             block_reason=response.block_reason,
-            guardrail_logs=response.guardrail_logs or []
+            guardrail_logs=response.guardrail_logs or [],
+            trace=response.trace or [],
+            threat_level=response.threat_level,
         )
         
     except ConnectionError as e:
@@ -272,6 +290,25 @@ async def get_security_logs(
         ],
         "summary": summary
     }
+
+
+@app.get("/api/analytics")
+async def get_analytics():
+    """Aggregated security analytics for the dashboard."""
+    global security_logger
+    if security_logger is None:
+        return {"kpis": {}, "events_by_type": {}, "events_by_category": {},
+                "threat_histogram": {}, "timeline": [], "recent_high_threat": []}
+    return security_logger.get_analytics()
+
+
+@app.get("/dashboard")
+async def dashboard():
+    """Serve the security analytics dashboard."""
+    dash_path = Path(__file__).parent.parent / "frontend" / "dashboard.html"
+    if dash_path.exists():
+        return FileResponse(dash_path)
+    raise HTTPException(status_code=404, detail="Dashboard not found")
 
 
 @app.delete("/api/documents")

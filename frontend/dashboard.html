@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Security Analytics · RAG Guardrails</title>
+    <meta name="description" content="Security analytics dashboard for the RAG Guardrails system">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <svg class="shield-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                        <path d="M9 12l2 2 4-4"/>
+                    </svg>
+                    <h1>Security Analytics</h1>
+                </div>
+                <nav class="top-nav">
+                    <a href="/" class="nav-link">💬 Chat</a>
+                    <a href="/dashboard" class="nav-link active">📊 Dashboard</a>
+                    <button class="btn btn-secondary btn-small" id="refresh-btn">↻ Refresh</button>
+                    <label class="autorefresh">
+                        <input type="checkbox" id="autorefresh-toggle"> Auto
+                    </label>
+                </nav>
+            </div>
+        </header>
+
+        <!-- Dashboard body -->
+        <main class="dashboard">
+            <!-- KPI cards -->
+            <section class="kpi-grid" id="kpi-grid">
+                <div class="kpi-card"><div class="kpi-value" id="kpi-total">—</div><div class="kpi-label">Total Events</div></div>
+                <div class="kpi-card danger"><div class="kpi-value" id="kpi-blocked">—</div><div class="kpi-label">Blocked Attacks</div></div>
+                <div class="kpi-card warning"><div class="kpi-value" id="kpi-sanitized">—</div><div class="kpi-label">Sanitized Outputs</div></div>
+                <div class="kpi-card"><div class="kpi-value" id="kpi-blockrate">—</div><div class="kpi-label">Block Rate</div></div>
+                <div class="kpi-card"><div class="kpi-value" id="kpi-avgthreat">—</div><div class="kpi-label">Avg Threat Level</div></div>
+                <div class="kpi-card danger"><div class="kpi-value" id="kpi-high">—</div><div class="kpi-label">High-Threat Events</div></div>
+            </section>
+
+            <!-- Charts -->
+            <section class="chart-grid">
+                <div class="panel panel-wide">
+                    <h3>Security Activity Over Time</h3>
+                    <div class="chart-host" id="chart-timeline"></div>
+                </div>
+                <div class="panel">
+                    <h3>Events by Type</h3>
+                    <div class="chart-host" id="chart-types"></div>
+                </div>
+                <div class="panel">
+                    <h3>Attack Categories</h3>
+                    <div class="chart-host" id="chart-categories"></div>
+                </div>
+                <div class="panel">
+                    <h3>Threat Severity</h3>
+                    <div class="chart-host" id="chart-threat"></div>
+                </div>
+                <div class="panel panel-wide">
+                    <h3>Recent High-Threat Events</h3>
+                    <div class="threat-feed" id="threat-feed"></div>
+                </div>
+            </section>
+
+            <!-- Capabilities -->
+            <section class="panel">
+                <h3>Active Defense Layers</h3>
+                <div class="capabilities" id="capabilities"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/js/charts.js"></script>
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

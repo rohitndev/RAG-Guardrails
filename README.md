@@ -59,13 +59,22 @@ This application demonstrates how the **same RAG system** can be:
 - 📊 **Source Attribution**: Each answer shows source file, chunk index, and similarity score
 - 🔐 **Guardrail Activity Pane**: Per-message log of every guardrail action taken
 
-### Security Guardrails
+### Security Guardrails (multi-layer defense)
 - 🚫 **Input Guard**: Prompt injection, jailbreak & role-play detection with diminishing-returns scoring
+- 🧠 **Semantic Guard** *(v2)*: Embedding-similarity detection of **paraphrased** attacks that share no keywords with known signatures — reuses the loaded MiniLM model, so **zero extra dependencies**
+- ⚖️ **Threat-Fusion Engine** *(v2)*: Combines regex + semantic (+ optional LLM judge) into one **explainable** 0–1 risk score with a per-layer trace
+- 🤖 **LLM-as-Judge** *(v2, optional)*: Escalates ambiguous "gray-zone" inputs to the local LLM for a semantic verdict
+- 🐤 **Canary Token** *(v2)*: Secret token embedded in the locked system prompt; if it ever leaks into the output, the **prompt-extraction attack is detected and blocked**
 - 🧹 **Document Sanitizer**: Remove embedded instructions, HTML/XML blocks & Unicode homoglyph attacks
 - 🔒 **System Prompt Lock**: Non-overridable system instructions in guarded mode
-- ⚖️ **Trust Scorer**: Retrieval-weighted content trust evaluation with linear context interpolation
-- 🔐 **Output Guard**: Sensitive data redaction + harmful content & manipulation-indicator blocking
+- 🔐 **Output Guard**: Sensitive data redaction (regex + **optional Presidio**) + harmful content & manipulation-indicator blocking
 - 📝 **Security Logger**: Thread-safe, JSON-persisted audit trail for all guardrail events
+
+### Security Analytics Dashboard *(v2)*
+- 📊 **Live dashboard** at `/dashboard` — KPI cards, activity-over-time timeline, events-by-type donut, attack-category breakdown, threat-severity histogram
+- 🔎 **Per-message guardrail trace** — every chat answer shows the ordered decision of each defense layer (pass / warn / block / skipped) plus an input threat meter
+- 🚨 **High-threat feed** + **active-defense-layer** indicators
+- 🪶 **Dependency-free SVG charts** — renders fully offline, no CDN charting library
 
 ---
 
@@ -85,17 +94,25 @@ graph TD
 
         subgraph Guardrails ["🛡️ GUARDRAILS MODULE"]
             style Guardrails fill:#fff3e0,stroke:#ff9800,stroke-width:2px
-            IG[Input Guard]
+            IG[Input Guard - regex]
+            SG[Semantic Guard - embeddings]
+            LJ[LLM Judge - optional]
+            TE[Threat Fusion Engine]
             DS[Doc Sanitizer]
             TS[Trust Scorer]
-            SPL[System Prompt Lock]
-            OG[Output Guard]
-            SL[Security Logger]
+            SPL[System Prompt Lock + Canary]
+            CA[Canary Leak Detector]
+            OG[Output Guard - PII]
+            SL[Security Logger + Analytics]
 
-            IG -->|Check| DS
-            IG -.->|Protect| SPL
+            IG --> TE
+            SG --> TE
+            LJ -.->|gray zone| TE
+            TE -->|allow| DS
             DS -->|Clean| TS
-            TS -->|Evaluate| OG
+            TS -->|Evaluate| SPL
+            SPL --> CA
+            CA --> OG
             OG -->|Audit| SL
         end
 
@@ -241,6 +258,66 @@ threat_level = scores[0] + scores[1] * 0.3 + scores[2] * 0.09 + ...
 
 ---
 
+### 1️⃣b Semantic Guard (`semantic_guard.py`) — *v2*
+
+**Purpose**: Catch **paraphrased** attacks that defeat regex. Regex only matches
+literal patterns; an attacker who writes *"kindly set aside the guidance you were
+configured with earlier"* shares no keywords with `ignore previous instructions`
+yet means exactly the same thing.
+
+**How**: A curated bank of canonical attack seed phrases (grouped by category) is
+embedded **once at startup** using the same `all-MiniLM-L6-v2` model already loaded
+for retrieval. Each incoming query is embedded and compared by cosine similarity
+to every seed. The maximum similarity becomes the layer's risk score.
+
+- ✅ **No new dependency** — reuses the existing embedding model
+- ✅ **Negligible latency** — one embedding + a dot-product against a small matrix
+- `SEMANTIC_BLOCK_SIMILARITY = 0.62`, `SEMANTIC_WARN_SIMILARITY = 0.45` (tunable via env)
+
+---
+
+### 1️⃣c Threat-Fusion Engine (`threat_engine.py`) — *v2*
+
+**Purpose**: Merge the independent input layers into **one explainable verdict**.
+
+Each layer votes with a 0–1 score. Rather than averaging, the engine takes the
+strongest signal and lets weaker corroborating signals nudge it upward with
+diminishing returns — one high-confidence detector is enough, but several medium
+signals together also escalate:
+
+```python
+fused = scores[0] + scores[1]*0.35 + scores[2]*0.35**2 + ...   # capped at 1.0
+```
+
+Every layer's contribution is recorded as a `LayerTrace` (name, status, score,
+detail) and surfaced in the chat UI and dashboard. Decision thresholds:
+`FUSION_BLOCK_THRESHOLD = 0.75`, `FUSION_WARN_THRESHOLD = 0.45`.
+
+---
+
+### 1️⃣d LLM-as-Judge (`llm_judge.py`) — *v2, optional*
+
+**Purpose**: For inputs the fast layers leave **ambiguous**, ask the local LLM for
+a semantic verdict. To control latency it only fires when the fused score lands in
+a configurable "gray zone" (default `0.35 – 0.80`), and it degrades gracefully
+(abstains) if the model is slow, offline, or returns malformed JSON.
+
+- Disabled by default (`LLM_JUDGE_ENABLED=false`) — adds one inference call
+- Strict JSON verdict: `{verdict, risk, category, reason}`
+- Robust to `<think>…</think>` preambles emitted by reasoning models
+
+---
+
+### 1️⃣e Canary Token (`canary.py`) — *v2*
+
+**Purpose**: Detect **system-prompt leakage / extraction**. A unique secret token
+is injected into the locked system prompt for each request, with an instruction to
+never reveal it. If that exact token appears in the model's output, the prompt was
+leaked — the response is **blocked** and the canary scrubbed before anything is
+returned. Logged as `PROMPT_LEAK_BLOCKED`.
+
+---
+
 ### 2️⃣ Document Sanitizer (`document_sanitizer.py`)
 
 **Purpose**: Strip embedded instructions from uploaded documents and retrieved chunks before they reach the LLM.
@@ -361,11 +438,12 @@ Any `system_prompt` value sent via the API is **silently ignored** in guarded mo
 **Storage**: `backend/data/logs/security_events.json` (auto-created)
 
 **Logged Event Types**:
-- `INPUT_BLOCKED` — Malicious input detected and rejected
+- `INPUT_BLOCKED` — Malicious input detected and rejected (by the fused threat engine)
 - `OUTPUT_SANITIZED` — Sensitive data redacted from response
 - `OUTPUT_BLOCKED` — Entire response blocked (harmful / manipulation detected)
 - `DOCUMENT_SANITIZED` — Instructions stripped from retrieved document chunk
 - `PROMPT_OVERRIDE_BLOCKED` — System prompt override attempt rejected
+- `PROMPT_LEAK_BLOCKED` — *(v2)* Canary token leaked → system-prompt extraction blocked
 
 **Log Format**:
 ```json
@@ -525,7 +603,15 @@ Check Ollama connectivity, model availability, and loaded document count.
   "ollama_connected": true,
   "model_available": true,
   "documents_count": 54,
-  "sources": ["sample.pdf", "test.txt"]
+  "sources": ["sample.pdf", "test.txt"],
+  "capabilities": {
+    "regex_guard": true,
+    "semantic_guard": true,
+    "llm_judge": false,
+    "canary": true,
+    "presidio_pii": false,
+    "model": "deepseek-r1:8b"
+  }
 }
 ```
 
@@ -573,9 +659,23 @@ Query the RAG system.
   ],
   "guardrails_active": true,
   "blocked": false,
-  "guardrail_logs": []
+  "guardrail_logs": [],
+  "threat_level": 0.0,
+  "trace": [
+    {"stage": "input",     "layer": "Pattern Match",        "status": "pass",    "score": 0.0,  "detail": "no signatures matched"},
+    {"stage": "input",     "layer": "Semantic Similarity",  "status": "pass",    "score": 0.21, "detail": "no semantic match"},
+    {"stage": "input",     "layer": "LLM Judge",            "status": "skipped", "score": 0.0,  "detail": "not enabled"},
+    {"stage": "retrieval", "layer": "Document Sanitizer",   "status": "pass",    "score": 0.0,  "detail": "5 chunks clean"},
+    {"stage": "retrieval", "layer": "Trust Scorer",         "status": "pass",    "score": 0.71, "detail": "avg trust 71%, context capped at 4000 chars"},
+    {"stage": "prompt",    "layer": "System Prompt Lock",   "status": "pass",    "score": 0.0,  "detail": "locked prompt enforced"},
+    {"stage": "output",    "layer": "Canary Token",         "status": "pass",    "score": 0.0,  "detail": "no prompt leak"},
+    {"stage": "output",    "layer": "Output Guard",         "status": "pass",    "score": 0.0,  "detail": "output clean"}
+  ]
 }
 ```
+
+> The `trace` array is the explainable, ordered record of every defense layer —
+> it powers the per-message guardrail trace in the chat UI.
 
 **Response (Blocked)**:
 ```json
@@ -622,6 +722,25 @@ Retrieve security event logs.
 
 ---
 
+#### `GET /api/analytics` *(v2)*
+Aggregated security analytics for the dashboard.
+
+**Response**:
+```json
+{
+  "kpis": {"total_events": 42, "blocked_count": 18, "sanitized_count": 9,
+           "block_rate": 0.43, "avg_threat_level": 0.61, "high_threat_count": 15},
+  "events_by_type": {"INPUT_BLOCKED": 18, "OUTPUT_SANITIZED": 9, "DOCUMENT_SANITIZED": 12},
+  "events_by_category": {"instruction_override": 7, "jailbreak": 5, "roleplay": 6},
+  "threat_histogram": {"low": 14, "medium": 13, "high": 15},
+  "timeline": [{"time": "2026-06-05T20", "total": 12, "blocked": 5}],
+  "recent_high_threat": [{"timestamp": "...", "event_type": "INPUT_BLOCKED", "threat_level": 0.95, "preview": "..."}]
+}
+```
+
+#### `GET /dashboard` *(v2)*
+Serves the security analytics dashboard (HTML).
+
 #### `DELETE /api/documents`
 Clear all documents from the FAISS vector store.
 
@@ -658,7 +777,32 @@ MAX_CONTEXT_LENGTH            = 2000   # chars for low-trust context
 MAX_CONTEXT_LENGTH_HIGH_TRUST = 4000   # chars for high-trust context
 
 # Allowed uploads
-ALLOWED_EXTENSIONS = {".pdf", ".txt"}
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md"}
+
+# --- Advanced guardrails (v2) — all overridable via environment variables ---
+FUSION_BLOCK_THRESHOLD   = 0.75   # env: FUSION_BLOCK_THRESHOLD
+FUSION_WARN_THRESHOLD    = 0.45   # env: FUSION_WARN_THRESHOLD
+
+SEMANTIC_GUARD_ENABLED   = True   # env: SEMANTIC_GUARD_ENABLED
+SEMANTIC_BLOCK_SIMILARITY = 0.62  # env: SEMANTIC_BLOCK_SIMILARITY
+SEMANTIC_WARN_SIMILARITY  = 0.45  # env: SEMANTIC_WARN_SIMILARITY
+
+LLM_JUDGE_ENABLED        = False  # env: LLM_JUDGE_ENABLED (adds an inference call)
+LLM_JUDGE_GRAY_LOW       = 0.35   # only escalate scores inside this band
+LLM_JUDGE_GRAY_HIGH      = 0.80
+LLM_JUDGE_TIMEOUT        = 20     # seconds
+
+CANARY_ENABLED           = True   # env: CANARY_ENABLED (prompt-leak detection)
+PRESIDIO_ENABLED         = False  # env: PRESIDIO_ENABLED (needs optional install)
+```
+
+**Example — turn on the LLM judge and Presidio PII engine:**
+
+```bash
+# Windows (PowerShell)
+$env:LLM_JUDGE_ENABLED="true"; $env:PRESIDIO_ENABLED="true"
+# Linux/macOS
+export LLM_JUDGE_ENABLED=true PRESIDIO_ENABLED=true
 ```
 
 ---
@@ -686,13 +830,17 @@ RAG-Guardrails/
 │   │   └── pipeline.py            # RAG orchestration (guarded & unguarded modes)
 │   │
 │   ├── guardrails/
-│   │   ├── __init__.py            # GuardrailsManager convenience class
-│   │   ├── input_guard.py         # Multi-category injection detection
+│   │   ├── __init__.py            # GuardrailsManager — wires all layers together
+│   │   ├── input_guard.py         # Multi-category regex injection detection
+│   │   ├── semantic_guard.py      # (v2) Embedding-similarity paraphrase detection
+│   │   ├── threat_engine.py       # (v2) Explainable multi-layer threat fusion
+│   │   ├── llm_judge.py           # (v2) Optional LLM-as-judge escalation
+│   │   ├── canary.py              # (v2) Canary-token prompt-leak detection
 │   │   ├── document_sanitizer.py  # Instruction stripping + homoglyph normalization
 │   │   ├── system_prompt.py       # Locked / unlocked prompt management
 │   │   ├── trust_scorer.py        # Retrieval-weighted trust scoring
-│   │   ├── output_guard.py        # PII redaction + harmful content blocking
-│   │   └── logger.py              # Thread-safe JSON security event logging
+│   │   ├── output_guard.py        # PII redaction (regex + optional Presidio) + blocking
+│   │   └── logger.py              # Thread-safe JSON logging + analytics aggregation
 │   │
 │   └── data/
 │       ├── uploads/               # Uploaded files (auto-created)
@@ -702,8 +850,12 @@ RAG-Guardrails/
 │
 ├── frontend/
 │   ├── index.html                 # Single-page chat UI (Inter + JetBrains Mono)
-│   ├── css/style.css              # Styling
-│   └── js/app.js                  # Drag-drop upload, chat, log sidebar
+│   ├── dashboard.html             # (v2) Security analytics dashboard
+│   ├── css/style.css              # Styling (chat + dashboard + guardrail trace)
+│   └── js/
+│       ├── app.js                 # Drag-drop upload, chat, guardrail trace render
+│       ├── dashboard.js           # (v2) Dashboard data fetch + render
+│       └── charts.js              # (v2) Dependency-free SVG charts
 │
 ├── sample.pdf                     # Test document with realistic content
 ├── test_document.txt              # Additional test file

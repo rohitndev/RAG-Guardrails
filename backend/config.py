@@ -37,5 +37,35 @@ TRUST_SCORE_THRESHOLD = 0.6
 MAX_CONTEXT_LENGTH = 2000  # characters for low trust
 MAX_CONTEXT_LENGTH_HIGH_TRUST = 4000  # characters for high trust
 
+# ---------------------------------------------------------------------------
+# Advanced guardrail settings (v2)
+# ---------------------------------------------------------------------------
+
+# Threat-fusion decision thresholds. The fused score combines the regex,
+# semantic and (optional) LLM-judge layers into a single 0..1 risk score.
+FUSION_BLOCK_THRESHOLD = float(os.getenv("FUSION_BLOCK_THRESHOLD", "0.75"))
+FUSION_WARN_THRESHOLD = float(os.getenv("FUSION_WARN_THRESHOLD", "0.45"))
+
+# Semantic guard: embedding-similarity detection of paraphrased attacks.
+# Reuses the already-loaded sentence-transformers model (no extra dependency).
+SEMANTIC_GUARD_ENABLED = os.getenv("SEMANTIC_GUARD_ENABLED", "true").lower() == "true"
+SEMANTIC_BLOCK_SIMILARITY = float(os.getenv("SEMANTIC_BLOCK_SIMILARITY", "0.62"))
+SEMANTIC_WARN_SIMILARITY = float(os.getenv("SEMANTIC_WARN_SIMILARITY", "0.45"))
+
+# LLM-as-judge: escalate ambiguous ("gray zone") inputs to the local LLM for a
+# semantic verdict. Disabled by default because it adds an extra inference call.
+LLM_JUDGE_ENABLED = os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
+# Only call the judge when the fused score is inside this uncertain band.
+LLM_JUDGE_GRAY_LOW = float(os.getenv("LLM_JUDGE_GRAY_LOW", "0.35"))
+LLM_JUDGE_GRAY_HIGH = float(os.getenv("LLM_JUDGE_GRAY_HIGH", "0.80"))
+LLM_JUDGE_TIMEOUT = int(os.getenv("LLM_JUDGE_TIMEOUT", "20"))  # seconds
+
+# Canary / prompt-leak detection: a secret token is embedded in the locked
+# system prompt; if it ever appears in the model output the prompt was leaked.
+CANARY_ENABLED = os.getenv("CANARY_ENABLED", "true").lower() == "true"
+
+# Optional Microsoft Presidio PII engine. Falls back to regex if unavailable.
+PRESIDIO_ENABLED = os.getenv("PRESIDIO_ENABLED", "false").lower() == "true"
+
 # Allowed file extensions
-ALLOWED_EXTENSIONS = {".pdf", ".txt"}
+ALLOWED_EXTENSIONS = {".pdf", ".txt", ".md"}

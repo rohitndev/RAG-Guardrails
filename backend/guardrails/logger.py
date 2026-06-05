@@ -278,6 +278,114 @@ class SecurityLogger:
                 "last_event": self.events[-1].timestamp if self.events else None
             }
     
+    def get_analytics(self) -> Dict[str, Any]:
+        """
+        Build an aggregated analytics payload for the security dashboard.
+
+        Returns time-bucketed activity, attack-category and event-type
+        breakdowns, a threat-level histogram, and headline KPIs.
+        """
+        with self._lock:
+            events = list(self.events)
+
+        if not events:
+            return {
+                "kpis": {
+                    "total_events": 0, "blocked_count": 0, "block_rate": 0.0,
+                    "avg_threat_level": 0.0, "high_threat_count": 0,
+                    "sanitized_count": 0,
+                },
+                "events_by_type": {},
+                "events_by_category": {},
+                "threat_histogram": {"low": 0, "medium": 0, "high": 0},
+                "timeline": [],
+                "recent_high_threat": [],
+            }
+
+        events_by_type: Dict[str, int] = {}
+        events_by_category: Dict[str, int] = {}
+        histogram = {"low": 0, "medium": 0, "high": 0}
+        timeline_buckets: Dict[str, Dict[str, int]] = {}
+
+        blocked_count = 0
+        sanitized_count = 0
+        total_threat = 0.0
+        high_threat_count = 0
+
+        for e in events:
+            events_by_type[e.event_type] = events_by_type.get(e.event_type, 0) + 1
+
+            if e.action_taken == "blocked":
+                blocked_count += 1
+            elif e.action_taken == "sanitized":
+                sanitized_count += 1
+
+            total_threat += e.threat_level
+            if e.threat_level >= 0.7:
+                high_threat_count += 1
+
+            # Threat histogram
+            if e.threat_level >= 0.7:
+                histogram["high"] += 1
+            elif e.threat_level >= 0.4:
+                histogram["medium"] += 1
+            else:
+                histogram["low"] += 1
+
+            # Attack categories (stored under a few possible detail keys)
+            cats = []
+            if isinstance(e.details, dict):
+                cats = (e.details.get("categories")
+                        or e.details.get("patterns_matched")
+                        or [])
+                if isinstance(cats, str):
+                    cats = [cats]
+            for c in cats:
+                events_by_category[c] = events_by_category.get(c, 0) + 1
+
+            # Timeline bucketed by hour (minute precision in the timestamp string)
+            bucket = e.timestamp[:13] if len(e.timestamp) >= 13 else e.timestamp
+            slot = timeline_buckets.setdefault(bucket, {"total": 0, "blocked": 0})
+            slot["total"] += 1
+            if e.action_taken == "blocked":
+                slot["blocked"] += 1
+
+        timeline = [
+            {"time": k, "total": v["total"], "blocked": v["blocked"]}
+            for k, v in sorted(timeline_buckets.items())
+        ]
+
+        recent_high = sorted(
+            [e for e in events if e.threat_level >= 0.7],
+            key=lambda e: e.timestamp, reverse=True,
+        )[:8]
+        recent_high_threat = [
+            {
+                "timestamp": e.timestamp,
+                "event_type": e.event_type,
+                "threat_level": e.threat_level,
+                "preview": (e.input_text[:80] + "...") if len(e.input_text) > 80 else e.input_text,
+            }
+            for e in recent_high
+        ]
+
+        total = len(events)
+        return {
+            "kpis": {
+                "total_events": total,
+                "blocked_count": blocked_count,
+                "sanitized_count": sanitized_count,
+                "block_rate": round(blocked_count / total, 3) if total else 0.0,
+                "avg_threat_level": round(total_threat / total, 3) if total else 0.0,
+                "high_threat_count": high_threat_count,
+            },
+            "events_by_type": events_by_type,
+            "events_by_category": events_by_category,
+            "threat_histogram": histogram,
+            "timeline": timeline,
+            "recent_high_threat": recent_high_threat,
+        }
+
     def clear_events(self):
         """Clear all logged events."""
         with self._lock:

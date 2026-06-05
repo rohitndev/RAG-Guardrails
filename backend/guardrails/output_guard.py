@@ -43,9 +43,15 @@ class OutputGuard:
         
         # Private keys
         (r'-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----', "[PRIVATE_KEY REDACTED]", "private_key"),
-        
+
         # IP addresses (internal)
         (r'\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}\b', "[INTERNAL_IP REDACTED]", "internal_ip"),
+
+        # JWT (header.payload.signature)
+        (r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b', "[JWT REDACTED]", "jwt"),
+
+        # Explicit credential assignments ("password: hunter2", "secret = abc123")
+        (r'(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|token)\b\s*[:=]\s*\S+', "[CREDENTIAL REDACTED]", "credential_assignment"),
     ]
     
     # Harmful content patterns to block
@@ -97,6 +103,21 @@ class OutputGuard:
                 self.compiled_manipulation.append((compiled, category))
             except re.error:
                 pass
+
+        # Optional Microsoft Presidio engine for richer, ML-backed PII detection.
+        # Regex patterns above remain the always-on baseline; Presidio augments
+        # them when installed and enabled. Import is fully optional.
+        self._presidio = None
+        try:
+            from config import PRESIDIO_ENABLED
+        except Exception:
+            PRESIDIO_ENABLED = False
+        if PRESIDIO_ENABLED:
+            try:
+                from presidio_analyzer import AnalyzerEngine
+                self._presidio = AnalyzerEngine()
+            except Exception:
+                self._presidio = None  # fall back silently to regex
     
     def check(self, output: str) -> OutputCheckResult:
         """
@@ -152,7 +173,12 @@ class OutputGuard:
                     "count": len(matches),
                     "action": "redacted"
                 })
-        
+
+        # Optional Presidio pass — catches entities (names, locations, etc.)
+        # the regex baseline does not model. Augments, never replaces, the regex.
+        if self._presidio is not None:
+            sanitized = self._apply_presidio(sanitized, issues)
+
         return OutputCheckResult(
             blocked=should_block,
             had_issues=len(issues) > 0,
@@ -161,6 +187,41 @@ class OutputGuard:
             issues=issues
         )
     
+    # Entities Presidio should redact (beyond what the regex layer covers).
+    _PRESIDIO_ENTITIES = [
+        "PERSON", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER",
+        "CREDIT_CARD", "US_SSN", "IBAN_CODE", "IP_ADDRESS",
+        "US_PASSPORT", "US_DRIVER_LICENSE", "CRYPTO",
+    ]
+
+    def _apply_presidio(self, text: str, issues: List[Dict[str, Any]]) -> str:
+        """Redact PII entities found by Presidio, splicing from the end so spans stay valid."""
+        try:
+            results = self._presidio.analyze(
+                text=text, entities=self._PRESIDIO_ENTITIES, language="en"
+            )
+        except Exception:
+            return text
+
+        # Keep only confident hits and redact right-to-left.
+        hits = sorted(
+            [r for r in results if getattr(r, "score", 0) >= 0.5],
+            key=lambda r: r.start, reverse=True,
+        )
+        counts: Dict[str, int] = {}
+        for r in hits:
+            text = text[:r.start] + f"[{r.entity_type} REDACTED]" + text[r.end:]
+            counts[r.entity_type] = counts.get(r.entity_type, 0) + 1
+
+        for entity, count in counts.items():
+            issues.append({
+                "type": "sensitive_data",
+                "category": f"presidio_{entity.lower()}",
+                "count": count,
+                "action": "redacted",
+            })
+        return text
+
     def redact_sensitive(self, text: str) -> str:
         """
         Redact only sensitive data from text.

@@ -18,3 +18,11 @@ requests==2.31.0
 # Utilities
 pydantic==2.5.3
 python-dotenv==1.0.0
+
+# ---------------------------------------------------------------------------
+# Optional: Microsoft Presidio for ML-backed PII detection in the Output Guard.
+# The output guard works on regex alone; install these + set PRESIDIO_ENABLED=true
+# to augment it. (Also run: python -m spacy download en_core_web_lg)
+# ---------------------------------------------------------------------------
+# presidio-analyzer==2.2.355
+# spacy==3.7.4

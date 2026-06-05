@@ -220,7 +220,9 @@ async function sendMessage() {
                 blocked: data.blocked,
                 blockReason: data.block_reason,
                 sources: data.sources,
-                guardrailLogs: data.guardrail_logs
+                guardrailLogs: data.guardrail_logs,
+                trace: data.trace,
+                threatLevel: data.threat_level
             });
             
             // Refresh logs if in guarded mode
@@ -281,18 +283,58 @@ function addMessage(role, content, guardrailsActive, extra = {}) {
         `;
     }
     
-    let guardrailLogsHTML = '';
-    if (extra.guardrailLogs && extra.guardrailLogs.length > 0) {
-        guardrailLogsHTML = `
-            <div class="guardrail-logs">
+    // Threat meter (only when guardrails were active)
+    let threatMeterHTML = '';
+    if (guardrailsActive && typeof extra.threatLevel === 'number') {
+        const pct = Math.round(extra.threatLevel * 100);
+        const color = pct >= 75 ? 'var(--accent-red)' : pct >= 45 ? 'var(--accent-yellow)' : 'var(--accent-green)';
+        threatMeterHTML = `
+            <div class="threat-meter">
+                <span>Input threat</span>
+                <span class="threat-meter-track">
+                    <span class="threat-meter-fill" style="width:${pct}%;background:${color}"></span>
+                </span>
+                <span style="font-family:'JetBrains Mono',monospace;color:${color}">${pct}%</span>
+            </div>`;
+    }
+
+    // Multi-layer guardrail trace pipeline
+    let traceHTML = '';
+    if (extra.trace && extra.trace.length > 0) {
+        const icons = { pass: '✓', warn: '⚠', block: '✕', skipped: '○' };
+        const stageNames = { input: 'Input Screening', retrieval: 'Retrieval & Context', prompt: 'Prompt', output: 'Output Scanning' };
+        let lastStage = null;
+        const steps = extra.trace.map(t => {
+            let stageHeader = '';
+            if (t.stage !== lastStage) {
+                stageHeader = `<div class="trace-stage-label">${stageNames[t.stage] || t.stage}</div>`;
+                lastStage = t.stage;
+            }
+            const scoreStr = (t.status !== 'skipped') ? `<span class="trace-score">${t.score}</span>` : '';
+            return `${stageHeader}
+                <div class="trace-step ${t.status}">
+                    <span class="trace-icon">${icons[t.status] || '•'}</span>
+                    <span class="trace-name">${t.layer}</span>
+                    <span class="trace-detail">${escapeHtml(t.detail || '')}</span>
+                    ${scoreStr}
+                </div>`;
+        }).join('');
+        traceHTML = `
+            <div class="guardrail-trace">
+                <h5>🛡️ Guardrail Trace (${extra.trace.length} layers)</h5>
+                <div class="trace-pipeline">${steps}</div>
+            </div>`;
+    } else if (extra.guardrailLogs && extra.guardrailLogs.length > 0) {
+        traceHTML = `
+            <div class="guardrail-trace">
                 <h5>🛡️ Guardrail Activity</h5>
                 ${extra.guardrailLogs.map(log => `
-                    <div class="guardrail-log-item">
-                        [${log.stage}] ${log.action}: ${log.reason || log.details || ''}
+                    <div class="trace-step ${log.action === 'blocked' ? 'block' : 'warn'}">
+                        <span class="trace-name">[${log.stage}] ${log.action}</span>
+                        <span class="trace-detail">${log.reason || ''}</span>
                     </div>
                 `).join('')}
-            </div>
-        `;
+            </div>`;
     }
     
     messageDiv.innerHTML = `
@@ -304,8 +346,9 @@ function addMessage(role, content, guardrailsActive, extra = {}) {
         <div class="message-content">
             ${blockedNotice}
             <div class="message-text">${escapeHtml(content)}</div>
+            ${threatMeterHTML}
             ${sourcesHTML}
-            ${guardrailLogsHTML}
+            ${traceHTML}
         </div>
     `;
     

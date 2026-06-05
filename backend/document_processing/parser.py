@@ -28,7 +28,7 @@ class DocumentParser:
         
         if suffix == ".pdf":
             return DocumentParser._parse_pdf(file_path)
-        elif suffix == ".txt":
+        elif suffix in (".txt", ".md", ".markdown"):
             return DocumentParser._parse_txt(file_path)
         else:
             raise ValueError(f"Unsupported file type: {suffix}")
